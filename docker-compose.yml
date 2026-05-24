@@ -1,0 +1,15 @@
+services:
+  expenses-tracker:
+    build: .
+    image: expenses-tracker:latest
+    container_name: expenses-tracker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GOOGLE_CREDENTIALS_FILE: /run/secrets/google-service-account.json
+    volumes:
+      - ./service-account.json:/run/secrets/google-service-account.json:ro
+    ports:
+      - "8080:8080"
+

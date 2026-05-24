@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+*.env
+service-account.json
+secrets/
+.worktrees/
+worktrees/
+tmp/
+dist/
+build/
+coverage/
+*.log
+Dockerfile
+docker-compose.yml

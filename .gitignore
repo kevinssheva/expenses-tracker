@@ -1,0 +1,27 @@
+# Secrets and local configuration
+.env
+*.env
+!.env.example
+service-account.json
+secrets/
+
+# Go build outputs
+bin/
+dist/
+build/
+*.test
+*.out
+coverage/
+
+# Local caches and temporary files
+tmp/
+.cache/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Local worktrees
+.worktrees/
+worktrees/
