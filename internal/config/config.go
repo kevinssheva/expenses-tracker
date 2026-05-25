@@ -48,7 +48,7 @@ func Load() (Config, error) {
 
 	sheetRange := strings.TrimSpace(os.Getenv("SHEET_RANGE"))
 	if sheetRange == "" {
-		sheetRange = "Sheet1!A:I"
+		sheetRange = "Sheet1!A:J"
 	}
 
 	return Config{

@@ -27,8 +27,8 @@ func TestLoadReadsRequiredEnvAndDefaults(t *testing.T) {
 	if cfg.Port != "8080" {
 		t.Fatalf("Port = %q, want %q", cfg.Port, "8080")
 	}
-	if cfg.SheetRange != "Sheet1!A:I" {
-		t.Fatalf("SheetRange = %q, want %q", cfg.SheetRange, "Sheet1!A:I")
+	if cfg.SheetRange != "Sheet1!A:J" {
+		t.Fatalf("SheetRange = %q, want %q", cfg.SheetRange, "Sheet1!A:J")
 	}
 	if cfg.Location.String() != "Asia/Jakarta" {
 		t.Fatalf("Location = %q, want %q", cfg.Location.String(), "Asia/Jakarta")

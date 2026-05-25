@@ -7,6 +7,7 @@ import (
 
 	"github.com/kevinssheva/expenses-tracker/internal/config"
 	"github.com/kevinssheva/expenses-tracker/internal/handler"
+	"github.com/kevinssheva/expenses-tracker/internal/service"
 	"github.com/kevinssheva/expenses-tracker/internal/sheets"
 )
 
@@ -16,13 +17,15 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	sheetsClient, err := sheets.NewClient(context.Background(), cfg.GoogleCredentialsFile, cfg.GoogleSheetID, cfg.SheetRange)
+	sheetsClient, err := sheets.NewClient(context.Background(), cfg.GoogleCredentialsFile, cfg.GoogleSheetID, cfg.SheetRange, cfg.Location)
 	if err != nil {
 		log.Fatalf("create sheets client: %v", err)
 	}
+	expenseService := service.NewExpenseService(sheetsClient, cfg.Location)
 
 	mux := http.NewServeMux()
-	mux.Handle("/expenses", handler.NewExpensesHandler(cfg.APIKey, cfg.Location, sheetsClient))
+	mux.Handle("/expenses", handler.NewExpensesHandler(cfg.APIKey, expenseService))
+	mux.Handle("/expenses/", handler.NewExpensesHandler(cfg.APIKey, expenseService))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
