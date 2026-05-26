@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/kevinssheva/expenses-tracker/internal/expense"
@@ -22,64 +21,43 @@ type ExpenseService interface {
 }
 
 type expensesHandler struct {
-	apiKey  string
-	service ExpenseService
+	apiKey   string
+	service  ExpenseService
+	location *time.Location
 }
 
 type expenseResponse struct {
 	ID            string `json:"id"`
-	Timestamp     string `json:"timestamp"`
+	Date          string `json:"date"`
 	Description   string `json:"description"`
 	Category      string `json:"category"`
 	Amount        int64  `json:"amount"`
 	PaymentMethod string `json:"payment_method"`
-	Source        string `json:"source"`
-	RawMessage    string `json:"raw_message"`
+	AccountWallet string `json:"account_wallet"`
 }
 
-func NewExpensesHandler(apiKey string, service ExpenseService) http.Handler {
-	return expensesHandler{apiKey: apiKey, service: service}
+func NewExpensesHandler(apiKey string, service ExpenseService, location *time.Location) expensesHandler {
+	return expensesHandler{apiKey: apiKey, service: service, location: location}
 }
 
-func (h expensesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-API-Key") != h.apiKey {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
+func RegisterExpensesRoutes(mux *http.ServeMux, apiKey string, service ExpenseService, location *time.Location) {
+	h := NewExpensesHandler(apiKey, service, location)
 
-	if r.URL.Path == "/expenses" {
-		switch r.Method {
-		case http.MethodPost:
-			h.createExpense(w, r)
-		case http.MethodGet:
-			h.listExpenses(w, r)
-		default:
-			w.Header().Set("Allow", "GET, POST")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-		return
-	}
+	mux.HandleFunc("GET /expenses", h.requireAPIKey(h.listExpenses))
+	mux.HandleFunc("POST /expenses", h.requireAPIKey(h.createExpense))
+	mux.HandleFunc("PATCH /expenses/{id}", h.requireAPIKey(h.updateExpense))
+	mux.HandleFunc("DELETE /expenses/{id}", h.requireAPIKey(h.deleteExpense))
+}
 
-	if strings.HasPrefix(r.URL.Path, "/expenses/") {
-		id := strings.TrimPrefix(r.URL.Path, "/expenses/")
-		if id == "" || strings.Contains(id, "/") {
-			http.NotFound(w, r)
+func (h expensesHandler) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != h.apiKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		switch r.Method {
-		case http.MethodPatch:
-			h.updateExpense(w, r, id)
-		case http.MethodDelete:
-			h.deleteExpense(w, r, id)
-		default:
-			w.Header().Set("Allow", "PATCH, DELETE")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-		return
+		next(w, r)
 	}
-
-	http.NotFound(w, r)
 }
 
 func (h expensesHandler) createExpense(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +78,7 @@ func (h expensesHandler) createExpense(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h expensesHandler) listExpenses(w http.ResponseWriter, r *http.Request) {
-	filter, err := parseFilter(r)
+	filter, err := parseFilter(r, h.location)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -119,8 +97,9 @@ func (h expensesHandler) listExpenses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]expenseResponse{"expenses": response})
 }
 
-func (h expensesHandler) updateExpense(w http.ResponseWriter, r *http.Request, id string) {
+func (h expensesHandler) updateExpense(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	id := r.PathValue("id")
 	var req expense.UpdateRequest
 	if err := decodeJSON(r, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -136,7 +115,8 @@ func (h expensesHandler) updateExpense(w http.ResponseWriter, r *http.Request, i
 	writeJSON(w, http.StatusOK, map[string]expenseResponse{"expense": toExpenseResponse(exp)})
 }
 
-func (h expensesHandler) deleteExpense(w http.ResponseWriter, r *http.Request, id string) {
+func (h expensesHandler) deleteExpense(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
 	if err := h.service.Delete(r.Context(), id); err != nil {
 		h.handleServiceError(w, "delete expense", err)
 		return
@@ -165,7 +145,7 @@ func decodeJSON(r *http.Request, value interface{}) error {
 	return decoder.Decode(value)
 }
 
-func parseFilter(r *http.Request) (service.Filter, error) {
+func parseFilter(r *http.Request, location *time.Location) (service.Filter, error) {
 	query := r.URL.Query()
 	for key := range query {
 		if key != "id" && key != "from" && key != "to" {
@@ -175,16 +155,16 @@ func parseFilter(r *http.Request) (service.Filter, error) {
 	filter := service.Filter{ID: query.Get("id")}
 
 	if query.Get("from") != "" {
-		from, err := time.Parse(time.RFC3339, query.Get("from"))
+		from, err := time.ParseInLocation("2006-01-02", query.Get("from"), location)
 		if err != nil {
-			return service.Filter{}, fmt.Errorf("from must be RFC3339")
+			return service.Filter{}, fmt.Errorf("from must use YYYY-MM-DD")
 		}
 		filter.From = &from
 	}
 	if query.Get("to") != "" {
-		to, err := time.Parse(time.RFC3339, query.Get("to"))
+		to, err := time.ParseInLocation("2006-01-02", query.Get("to"), location)
 		if err != nil {
-			return service.Filter{}, fmt.Errorf("to must be RFC3339")
+			return service.Filter{}, fmt.Errorf("to must use YYYY-MM-DD")
 		}
 		filter.To = &to
 	}
@@ -201,12 +181,11 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 func toExpenseResponse(exp expense.Expense) expenseResponse {
 	return expenseResponse{
 		ID:            exp.ID,
-		Timestamp:     exp.Timestamp.Format(time.RFC3339),
+		Date:          exp.Date.Format("2006-01-02"),
 		Description:   exp.Description,
 		Category:      exp.Category,
 		Amount:        exp.Amount,
 		PaymentMethod: exp.PaymentMethod,
-		Source:        exp.Source,
-		RawMessage:    exp.RawMessage,
+		AccountWallet: exp.AccountWallet,
 	}
 }

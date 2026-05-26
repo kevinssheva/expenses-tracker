@@ -24,8 +24,7 @@ func main() {
 	expenseService := service.NewExpenseService(sheetsClient, cfg.Location)
 
 	mux := http.NewServeMux()
-	mux.Handle("/expenses", handler.NewExpensesHandler(cfg.APIKey, expenseService))
-	mux.Handle("/expenses/", handler.NewExpensesHandler(cfg.APIKey, expenseService))
+	handler.RegisterExpensesRoutes(mux, cfg.APIKey, expenseService, cfg.Location)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)

@@ -12,9 +12,16 @@ import (
 )
 
 type fakeStore struct {
-	expenses []expense.Expense
-	saved    []expense.Expense
-	err      error
+	expenses   []expense.Expense
+	appended   []expense.Expense
+	updated    []expense.Expense
+	deletedIDs []string
+	sortCount  int
+	err        error
+	deleteErr  error
+	appendErr  error
+	updateErr  error
+	sortErr    error
 }
 
 func (f *fakeStore) ListExpenses(context.Context) ([]expense.Expense, error) {
@@ -24,26 +31,17 @@ func (f *fakeStore) ListExpenses(context.Context) ([]expense.Expense, error) {
 	return append([]expense.Expense(nil), f.expenses...), nil
 }
 
-func (f *fakeStore) SaveExpenses(_ context.Context, expenses []expense.Expense) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.saved = append([]expense.Expense(nil), expenses...)
-	return nil
-}
-
-func TestCreateUsesProvidedTimestampAndSavesSorted(t *testing.T) {
-	location := time.FixedZone("Asia/Jakarta", 7*60*60)
-	existing := expense.Expense{ID: "exp_existing", Timestamp: time.Date(2026, 5, 25, 12, 0, 0, 0, location), Description: "lunch", Amount: 50000, Source: "nanoclaw"}
-	store := &fakeStore{expenses: []expense.Expense{existing}}
-	svc := NewExpenseServiceWithClockAndID(store, location, func() time.Time {
-		return time.Date(2026, 5, 25, 9, 0, 0, 0, location)
-	}, func() string { return "exp_new" })
+func TestCreateAppendsExpenseAndSorts(t *testing.T) {
+	store := &fakeStore{}
+	svc := newExpenseServiceWithID(store, time.UTC, func() string { return "exp_new" })
 
 	created, err := svc.Create(context.Background(), expense.CreateRequest{
-		Timestamp:   "2026-05-25T08:00:00+07:00",
-		Description: "breakfast",
-		Amount:      25000,
+		Date:          "2026-05-25",
+		Description:   "Makan ayam geprek",
+		Category:      "Food",
+		Amount:        35000,
+		PaymentMethod: "QRIS",
+		AccountWallet: "GoPay",
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -52,36 +50,33 @@ func TestCreateUsesProvidedTimestampAndSavesSorted(t *testing.T) {
 	if created.ID != "exp_new" {
 		t.Fatalf("ID = %q, want exp_new", created.ID)
 	}
-	if !created.Timestamp.Equal(time.Date(2026, 5, 25, 8, 0, 0, 0, location)) {
-		t.Fatalf("Timestamp = %v, want provided timestamp", created.Timestamp)
+	if got := ids(store.appended); !reflect.DeepEqual(got, []string{"exp_new"}) {
+		t.Fatalf("appended ids = %#v, want exp_new", got)
 	}
-	wantOrder := []string{"exp_new", "exp_existing"}
-	if gotOrder := ids(store.saved); !reflect.DeepEqual(gotOrder, wantOrder) {
-		t.Fatalf("saved order = %#v, want %#v", gotOrder, wantOrder)
-	}
-}
-
-func TestCreateUsesCurrentTimeWhenTimestampMissing(t *testing.T) {
-	now := time.Date(2026, 5, 25, 9, 0, 0, 0, time.UTC)
-	store := &fakeStore{}
-	svc := NewExpenseServiceWithClockAndID(store, time.UTC, func() time.Time { return now }, func() string { return "exp_new" })
-
-	created, err := svc.Create(context.Background(), expense.CreateRequest{Description: "lunch", Amount: 50000})
-	if err != nil {
-		t.Fatalf("Create returned error: %v", err)
-	}
-
-	if !created.Timestamp.Equal(now) {
-		t.Fatalf("Timestamp = %v, want %v", created.Timestamp, now)
+	if store.sortCount != 1 {
+		t.Fatalf("sortCount = %d, want 1", store.sortCount)
 	}
 }
 
 func TestCreateReturnsInvalidForValidationError(t *testing.T) {
-	svc := NewExpenseServiceWithClockAndID(&fakeStore{}, time.UTC, time.Now, func() string { return "exp_new" })
+	svc := newExpenseServiceWithID(&fakeStore{}, time.UTC, func() string { return "exp_new" })
 
-	_, err := svc.Create(context.Background(), expense.CreateRequest{Description: "", Amount: 50000})
+	_, err := svc.Create(context.Background(), expense.CreateRequest{Date: "2026-05-25", Description: "coffee", Category: "Salary", Amount: 20000})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Create error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestCreateReturnsStoreErrorWithoutSorting(t *testing.T) {
+	store := &fakeStore{appendErr: errors.New("append failed")}
+	svc := newExpenseServiceWithID(store, time.UTC, func() string { return "exp_new" })
+
+	_, err := svc.Create(context.Background(), expense.CreateRequest{Date: "2026-05-25", Description: "coffee", Category: "Food", Amount: 20000})
+	if err == nil {
+		t.Fatal("Create returned nil error, want append error")
+	}
+	if store.sortCount != 0 {
+		t.Fatalf("sortCount = %d, want 0", store.sortCount)
 	}
 }
 
@@ -89,9 +84,7 @@ func TestCreateSerializesConcurrentWrites(t *testing.T) {
 	store := &concurrentStore{}
 	var idMu sync.Mutex
 	ids := []string{"exp_1", "exp_2"}
-	svc := NewExpenseServiceWithClockAndID(store, time.UTC, func() time.Time {
-		return time.Date(2026, 5, 25, 10, 0, 0, 0, time.UTC)
-	}, func() string {
+	svc := newExpenseServiceWithID(store, time.UTC, func() string {
 		idMu.Lock()
 		defer idMu.Unlock()
 		id := ids[0]
@@ -104,7 +97,7 @@ func TestCreateSerializesConcurrentWrites(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := svc.Create(context.Background(), expense.CreateRequest{Description: "coffee", Amount: 20000})
+			_, err := svc.Create(context.Background(), expense.CreateRequest{Date: "2026-05-25", Description: "coffee", Category: "Food", Amount: 20000})
 			if err != nil {
 				t.Errorf("Create returned error: %v", err)
 			}
@@ -117,16 +110,16 @@ func TestCreateSerializesConcurrentWrites(t *testing.T) {
 	}
 }
 
-func TestListFiltersByIDAndTimeRange(t *testing.T) {
+func TestListFiltersByIDAndDateRange(t *testing.T) {
 	expenses := []expense.Expense{
-		{ID: "exp_1", Timestamp: time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC), Description: "coffee", Amount: 20000, Source: "nanoclaw"},
-		{ID: "exp_2", Timestamp: time.Date(2026, 5, 25, 10, 0, 0, 0, time.UTC), Description: "lunch", Amount: 50000, Source: "nanoclaw"},
-		{ID: "exp_3", Timestamp: time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC), Description: "dinner", Amount: 75000, Source: "nanoclaw"},
+		{ID: "exp_1", Date: time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC), Description: "coffee", Category: "Food", Amount: 20000},
+		{ID: "exp_2", Date: time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC), Description: "lunch", Category: "Food", Amount: 50000},
+		{ID: "exp_3", Date: time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC), Description: "dinner", Category: "Food", Amount: 75000},
 	}
 	store := &fakeStore{expenses: expenses}
-	svc := NewExpenseServiceWithClockAndID(store, time.UTC, time.Now, func() string { return "exp_new" })
+	svc := newExpenseServiceWithID(store, time.UTC, func() string { return "exp_new" })
 	from := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC)
-	to := time.Date(2026, 5, 25, 23, 59, 59, 0, time.UTC)
+	to := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC)
 
 	got, err := svc.List(context.Background(), Filter{From: &from, To: &to})
 	if err != nil {
@@ -145,16 +138,16 @@ func TestListFiltersByIDAndTimeRange(t *testing.T) {
 	}
 }
 
-func TestUpdateEditsMatchingExpenseAndSavesSorted(t *testing.T) {
+func TestUpdateEditsMatchingExpenseAndSorts(t *testing.T) {
 	store := &fakeStore{expenses: []expense.Expense{
-		{ID: "exp_1", Timestamp: time.Date(2026, 5, 25, 10, 0, 0, 0, time.UTC), Description: "coffee", Amount: 20000, Source: "nanoclaw"},
-		{ID: "exp_2", Timestamp: time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC), Description: "lunch", Amount: 50000, Source: "nanoclaw"},
+		{ID: "exp_1", Date: time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC), Description: "coffee", Category: "Food", Amount: 20000},
+		{ID: "exp_2", Date: time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC), Description: "lunch", Category: "Food", Amount: 50000},
 	}}
-	svc := NewExpenseServiceWithClockAndID(store, time.UTC, time.Now, func() string { return "exp_new" })
+	svc := newExpenseServiceWithID(store, time.UTC, func() string { return "exp_new" })
 	description := "brunch"
-	timestamp := "2026-05-25T09:00:00Z"
+	date := "2026-05-24"
 
-	updated, err := svc.Update(context.Background(), "exp_2", expense.UpdateRequest{Timestamp: &timestamp, Description: &description})
+	updated, err := svc.Update(context.Background(), "exp_2", expense.UpdateRequest{Date: &date, Description: &description})
 	if err != nil {
 		t.Fatalf("Update returned error: %v", err)
 	}
@@ -162,13 +155,16 @@ func TestUpdateEditsMatchingExpenseAndSavesSorted(t *testing.T) {
 	if updated.Description != "brunch" {
 		t.Fatalf("Description = %q, want brunch", updated.Description)
 	}
-	if gotOrder := ids(store.saved); !reflect.DeepEqual(gotOrder, []string{"exp_2", "exp_1"}) {
-		t.Fatalf("saved order = %#v, want exp_2 then exp_1", gotOrder)
+	if got := ids(store.updated); !reflect.DeepEqual(got, []string{"exp_2"}) {
+		t.Fatalf("updated ids = %#v, want exp_2", got)
+	}
+	if store.sortCount != 1 {
+		t.Fatalf("sortCount = %d, want 1", store.sortCount)
 	}
 }
 
 func TestUpdateReturnsNotFound(t *testing.T) {
-	svc := NewExpenseServiceWithClockAndID(&fakeStore{}, time.UTC, time.Now, func() string { return "exp_new" })
+	svc := newExpenseServiceWithID(&fakeStore{}, time.UTC, func() string { return "exp_new" })
 
 	_, err := svc.Update(context.Background(), "missing", expense.UpdateRequest{})
 	if !errors.Is(err, ErrNotFound) {
@@ -177,8 +173,8 @@ func TestUpdateReturnsNotFound(t *testing.T) {
 }
 
 func TestUpdateReturnsInvalidForValidationError(t *testing.T) {
-	store := &fakeStore{expenses: []expense.Expense{{ID: "exp_1", Timestamp: time.Now(), Description: "coffee", Amount: 20000, Source: "nanoclaw"}}}
-	svc := NewExpenseServiceWithClockAndID(store, time.UTC, time.Now, func() string { return "exp_new" })
+	store := &fakeStore{expenses: []expense.Expense{{ID: "exp_1", Date: time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC), Description: "coffee", Category: "Food", Amount: 20000}}}
+	svc := newExpenseServiceWithID(store, time.UTC, func() string { return "exp_new" })
 	amount := int64(0)
 
 	_, err := svc.Update(context.Background(), "exp_1", expense.UpdateRequest{Amount: &amount})
@@ -188,23 +184,23 @@ func TestUpdateReturnsInvalidForValidationError(t *testing.T) {
 }
 
 func TestDeleteRemovesMatchingExpense(t *testing.T) {
-	store := &fakeStore{expenses: []expense.Expense{
-		{ID: "exp_1", Timestamp: time.Date(2026, 5, 25, 10, 0, 0, 0, time.UTC), Description: "coffee", Amount: 20000, Source: "nanoclaw"},
-		{ID: "exp_2", Timestamp: time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC), Description: "lunch", Amount: 50000, Source: "nanoclaw"},
-	}}
-	svc := NewExpenseServiceWithClockAndID(store, time.UTC, time.Now, func() string { return "exp_new" })
+	store := &fakeStore{}
+	svc := newExpenseServiceWithID(store, time.UTC, func() string { return "exp_new" })
 
 	if err := svc.Delete(context.Background(), "exp_1"); err != nil {
 		t.Fatalf("Delete returned error: %v", err)
 	}
 
-	if gotIDs := ids(store.saved); !reflect.DeepEqual(gotIDs, []string{"exp_2"}) {
-		t.Fatalf("saved ids = %#v, want exp_2", gotIDs)
+	if !reflect.DeepEqual(store.deletedIDs, []string{"exp_1"}) {
+		t.Fatalf("deleted IDs = %#v, want exp_1", store.deletedIDs)
+	}
+	if store.sortCount != 0 {
+		t.Fatalf("sortCount = %d, want 0", store.sortCount)
 	}
 }
 
 func TestDeleteReturnsNotFound(t *testing.T) {
-	svc := NewExpenseServiceWithClockAndID(&fakeStore{}, time.UTC, time.Now, func() string { return "exp_new" })
+	svc := newExpenseServiceWithID(&fakeStore{deleteErr: ErrNotFound}, time.UTC, func() string { return "exp_new" })
 
 	err := svc.Delete(context.Background(), "missing")
 	if !errors.Is(err, ErrNotFound) {
@@ -233,9 +229,67 @@ func (s *concurrentStore) ListExpenses(context.Context) ([]expense.Expense, erro
 	return expenses, nil
 }
 
-func (s *concurrentStore) SaveExpenses(_ context.Context, expenses []expense.Expense) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.expenses = append([]expense.Expense(nil), expenses...)
+func (f *fakeStore) AppendExpense(_ context.Context, exp expense.Expense) error {
+	if f.appendErr != nil {
+		return f.appendErr
+	}
+	f.appended = append(f.appended, exp)
 	return nil
 }
+
+func (f *fakeStore) UpdateExpense(_ context.Context, exp expense.Expense) error {
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	f.updated = append(f.updated, exp)
+	return nil
+}
+
+func (f *fakeStore) DeleteExpense(_ context.Context, id string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deletedIDs = append(f.deletedIDs, id)
+	return nil
+}
+
+func (f *fakeStore) SortExpenses(context.Context) error {
+	if f.sortErr != nil {
+		return f.sortErr
+	}
+	f.sortCount++
+	return nil
+}
+
+func (s *concurrentStore) AppendExpense(_ context.Context, exp expense.Expense) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expenses = append(s.expenses, exp)
+	return nil
+}
+
+func (s *concurrentStore) UpdateExpense(_ context.Context, exp expense.Expense) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.expenses {
+		if s.expenses[i].ID == exp.ID {
+			s.expenses[i] = exp
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (s *concurrentStore) DeleteExpense(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.expenses {
+		if s.expenses[i].ID == id {
+			s.expenses = append(s.expenses[:i], s.expenses[i+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (s *concurrentStore) SortExpenses(context.Context) error { return nil }

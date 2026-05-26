@@ -1,8 +1,6 @@
 package expense
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -10,58 +8,62 @@ import (
 	"time"
 )
 
-const defaultSource = "nanoclaw"
+var ErrNotFound = errors.New("expense not found")
+
+var allowedCategories = map[string]struct{}{
+	"Food":          {},
+	"Subscription":  {},
+	"Transport":     {},
+	"Shopping":      {},
+	"Bills":         {},
+	"Health":        {},
+	"Entertainment": {},
+	"Education":     {},
+	"Other":         {},
+}
 
 type CreateRequest struct {
-	Timestamp     string `json:"timestamp"`
+	Date          string `json:"date"`
 	Description   string `json:"description"`
 	Category      string `json:"category"`
 	Amount        int64  `json:"amount"`
 	PaymentMethod string `json:"payment_method"`
-	Source        string `json:"source"`
-	RawMessage    string `json:"raw_message"`
+	AccountWallet string `json:"account_wallet"`
 }
 
 type UpdateRequest struct {
-	Timestamp     *string `json:"timestamp"`
+	Date          *string `json:"date"`
 	Description   *string `json:"description"`
 	Category      *string `json:"category"`
 	Amount        *int64  `json:"amount"`
 	PaymentMethod *string `json:"payment_method"`
-	Source        *string `json:"source"`
-	RawMessage    *string `json:"raw_message"`
+	AccountWallet *string `json:"account_wallet"`
 }
 
 type Expense struct {
 	ID            string
-	Timestamp     time.Time
+	Date          time.Time
 	Description   string
 	Category      string
 	Amount        int64
 	PaymentMethod string
-	Source        string
-	RawMessage    string
+	AccountWallet string
 }
 
-func New(id string, req CreateRequest, defaultTimestamp time.Time) (Expense, error) {
-	timestamp := defaultTimestamp
-	if strings.TrimSpace(req.Timestamp) != "" {
-		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(req.Timestamp))
-		if err != nil {
-			return Expense{}, fmt.Errorf("timestamp must be RFC3339: %w", err)
-		}
-		timestamp = parsed
+func New(id string, req CreateRequest, location *time.Location) (Expense, error) {
+	date, err := parseDate(req.Date, location)
+	if err != nil {
+		return Expense{}, err
 	}
 
 	exp := Expense{
 		ID:            strings.TrimSpace(id),
-		Timestamp:     timestamp,
+		Date:          date,
 		Description:   strings.TrimSpace(req.Description),
-		Category:      req.Category,
+		Category:      strings.TrimSpace(req.Category),
 		Amount:        req.Amount,
 		PaymentMethod: req.PaymentMethod,
-		Source:        sourceOrDefault(req.Source),
-		RawMessage:    req.RawMessage,
+		AccountWallet: req.AccountWallet,
 	}
 	if err := exp.validate(); err != nil {
 		return Expense{}, err
@@ -69,21 +71,21 @@ func New(id string, req CreateRequest, defaultTimestamp time.Time) (Expense, err
 	return exp, nil
 }
 
-func (e Expense) ApplyUpdate(req UpdateRequest) (Expense, error) {
+func (e Expense) ApplyUpdate(req UpdateRequest, location *time.Location) (Expense, error) {
 	updated := e
 
-	if req.Timestamp != nil {
-		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*req.Timestamp))
+	if req.Date != nil {
+		date, err := parseDate(*req.Date, location)
 		if err != nil {
-			return Expense{}, fmt.Errorf("timestamp must be RFC3339: %w", err)
+			return Expense{}, err
 		}
-		updated.Timestamp = parsed
+		updated.Date = date
 	}
 	if req.Description != nil {
 		updated.Description = strings.TrimSpace(*req.Description)
 	}
 	if req.Category != nil {
-		updated.Category = *req.Category
+		updated.Category = strings.TrimSpace(*req.Category)
 	}
 	if req.Amount != nil {
 		updated.Amount = *req.Amount
@@ -91,11 +93,8 @@ func (e Expense) ApplyUpdate(req UpdateRequest) (Expense, error) {
 	if req.PaymentMethod != nil {
 		updated.PaymentMethod = *req.PaymentMethod
 	}
-	if req.Source != nil {
-		updated.Source = sourceOrDefault(*req.Source)
-	}
-	if req.RawMessage != nil {
-		updated.RawMessage = *req.RawMessage
+	if req.AccountWallet != nil {
+		updated.AccountWallet = *req.AccountWallet
 	}
 
 	if err := updated.validate(); err != nil {
@@ -105,74 +104,39 @@ func (e Expense) ApplyUpdate(req UpdateRequest) (Expense, error) {
 }
 
 func (e Expense) Row(location *time.Location) []interface{} {
-	timestamp := e.Timestamp.In(location)
 	return []interface{}{
-		e.ID,
-		timestamp.Format(time.RFC3339),
-		timestamp.Format("2006-01-02"),
-		timestamp.Format("15:04"),
+		e.Date.In(location).Format("2006-01-02"),
 		e.Description,
 		e.Category,
 		e.Amount,
 		e.PaymentMethod,
-		e.Source,
-		e.RawMessage,
+		e.AccountWallet,
+		e.ID,
 	}
 }
 
 func ExpenseFromRow(row []interface{}, location *time.Location) (Expense, error) {
-	if len(row) >= 6 && isRFC3339(cellString(cellAt(row, 0))) {
-		return legacyExpenseFromRow(row, location)
-	}
-
 	if len(row) < 7 {
-		return Expense{}, fmt.Errorf("expense row has %d columns, want at least 7", len(row))
+		return Expense{}, fmt.Errorf("expense row has %d columns, want 7", len(row))
 	}
 
-	timestamp, err := time.Parse(time.RFC3339, cellString(cellAt(row, 1)))
+	date, err := parseDate(cellString(cellAt(row, 0)), location)
 	if err != nil {
-		return Expense{}, fmt.Errorf("parse timestamp: %w", err)
-	}
-	amount, err := cellInt64(cellAt(row, 6))
-	if err != nil {
-		return Expense{}, fmt.Errorf("parse amount: %w", err)
-	}
-
-	exp := Expense{
-		ID:            cellString(cellAt(row, 0)),
-		Timestamp:     timestamp.In(location),
-		Description:   cellString(cellAt(row, 4)),
-		Category:      cellString(cellAt(row, 5)),
-		Amount:        amount,
-		PaymentMethod: cellString(cellAt(row, 7)),
-		Source:        sourceOrDefault(cellString(cellAt(row, 8))),
-		RawMessage:    cellString(cellAt(row, 9)),
-	}
-	if err := exp.validate(); err != nil {
 		return Expense{}, err
 	}
-	return exp, nil
-}
-
-func legacyExpenseFromRow(row []interface{}, location *time.Location) (Expense, error) {
-	timestamp, err := time.Parse(time.RFC3339, cellString(cellAt(row, 0)))
-	if err != nil {
-		return Expense{}, fmt.Errorf("parse timestamp: %w", err)
-	}
-	amount, err := cellInt64(cellAt(row, 5))
+	amount, err := cellInt64(cellAt(row, 3))
 	if err != nil {
 		return Expense{}, fmt.Errorf("parse amount: %w", err)
 	}
 
 	exp := Expense{
-		ID:            legacyID(row),
-		Timestamp:     timestamp.In(location),
-		Description:   cellString(cellAt(row, 3)),
-		Category:      cellString(cellAt(row, 4)),
+		Date:          date,
+		Description:   cellString(cellAt(row, 1)),
+		Category:      cellString(cellAt(row, 2)),
 		Amount:        amount,
-		PaymentMethod: cellString(cellAt(row, 6)),
-		Source:        sourceOrDefault(cellString(cellAt(row, 7))),
-		RawMessage:    cellString(cellAt(row, 8)),
+		PaymentMethod: cellString(cellAt(row, 4)),
+		AccountWallet: cellString(cellAt(row, 5)),
+		ID:            cellString(cellAt(row, 6)),
 	}
 	if err := exp.validate(); err != nil {
 		return Expense{}, err
@@ -184,24 +148,30 @@ func (e Expense) validate() error {
 	if strings.TrimSpace(e.ID) == "" {
 		return errors.New("id is required")
 	}
+	if e.Date.IsZero() {
+		return errors.New("date is required")
+	}
 	if strings.TrimSpace(e.Description) == "" {
 		return errors.New("description is required")
+	}
+	if _, ok := allowedCategories[e.Category]; !ok {
+		return fmt.Errorf("category must be one of Food, Subscription, Transport, Shopping, Bills, Health, Entertainment, Education, Other")
 	}
 	if e.Amount <= 0 {
 		return errors.New("amount must be greater than 0")
 	}
-	if e.Timestamp.IsZero() {
-		return errors.New("timestamp is required")
-	}
 	return nil
 }
 
-func sourceOrDefault(source string) string {
-	trimmed := strings.TrimSpace(source)
-	if trimmed == "" {
-		return defaultSource
+func parseDate(value string, location *time.Location) (time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, errors.New("date is required")
 	}
-	return trimmed
+	date, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(value), location)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("date must use YYYY-MM-DD: %w", err)
+	}
+	return date, nil
 }
 
 func cellString(value interface{}) string {
@@ -232,18 +202,4 @@ func cellInt64(value interface{}) (int64, error) {
 		amount = strings.NewReplacer(",", "", ".", "").Replace(amount)
 		return strconv.ParseInt(amount, 10, 64)
 	}
-}
-
-func isRFC3339(value string) bool {
-	_, err := time.Parse(time.RFC3339, value)
-	return err == nil
-}
-
-func legacyID(row []interface{}) string {
-	parts := make([]string, 0, len(row))
-	for _, value := range row {
-		parts = append(parts, cellString(value))
-	}
-	sum := sha1.Sum([]byte(strings.Join(parts, "\x00")))
-	return "exp_legacy_" + hex.EncodeToString(sum[:])[:12]
 }
