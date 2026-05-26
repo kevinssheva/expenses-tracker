@@ -69,6 +69,18 @@ Build the image:
 docker build -t expenses-tracker:latest .
 ```
 
+Published images are available from GHCR after pushes to `main`:
+
+```bash
+docker pull ghcr.io/kevinssheva/expenses-tracker:latest
+```
+
+For private packages, authenticate first:
+
+```bash
+echo "$CR_PAT" | docker login ghcr.io -u kevinssheva --password-stdin
+```
+
 Run it with env vars and a read-only service account mount:
 
 ```bash

@@ -10,6 +10,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/expense
 
 FROM alpine:3.22
 
+LABEL org.opencontainers.image.source="https://github.com/kevinssheva/expenses-tracker"
+LABEL org.opencontainers.image.description="Expenses tracker service"
+
 RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
