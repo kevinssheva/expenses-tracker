@@ -72,7 +72,7 @@ docker build -t expenses-tracker:latest .
 Published images are available from GHCR after pushes to `main`:
 
 ```bash
-docker pull ghcr.io/kevinssheva/expenses-tracker:latest
+docker pull ghcr.io/kevinssheva/expenses-tracker-app:latest
 ```
 
 For private packages, authenticate first:
